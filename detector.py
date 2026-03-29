@@ -242,20 +242,31 @@ class PatchCore:
     
     def get_bboxes(self, anomaly_map, feat_size, original_size):
         """
-        从异常图中提取边界框
+        从异常图中提取边界框（改进版 - 更宽松）
         """
         H, W = feat_size
         orig_W, orig_H = original_size
         
-        # 自适应阈值
-        threshold = np.percentile(anomaly_map, 80)
+        # 直接使用较低阈值，确保能检测到异常
+        threshold = np.percentile(anomaly_map, 70)  # 降低到70
+        
+        # 如果异常图最大值很低，进一步降低阈值
+        max_anomaly = np.max(anomaly_map)
+        if max_anomaly < 0.5:
+            threshold = np.percentile(anomaly_map, 50)  # 异常不明显时用中位数
         
         # 创建掩码
         mask = (anomaly_map > threshold).astype(np.uint8)
         
-        # 形态学操作
-        kernel = np.ones((3, 3), np.uint8)
+        # 如果掩码为空，直接用最大值的一半作为阈值
+        if mask.sum() == 0:
+            threshold = max_anomaly * 0.5
+            mask = (anomaly_map > threshold).astype(np.uint8)
+        
+        # 形态学操作：先膨胀再腐蚀，连接相邻区域
+        kernel = np.ones((5, 5), np.uint8)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
         
         # 连通组件分析
         num, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
@@ -264,8 +275,9 @@ class PatchCore:
         for i in range(1, num):
             area = stats[i, cv2.CC_STAT_AREA]
             
-            # 过滤小区域
-            if area < H * W * 0.001:
+            # 降低最小面积要求
+            min_area = max(10, H * W * 0.001)  # 至少10个像素或0.1%
+            if area < min_area:
                 continue
             
             x, y, w, h = (
@@ -275,14 +287,21 @@ class PatchCore:
                 stats[i, cv2.CC_STAT_HEIGHT],
             )
             
-            # 计算区域平均异常得分
-            region_score = float(anomaly_map[labels == i].mean())
+            # 计算区域异常得分（取最大值，更敏感）
+            region_mask = (labels == i)
+            region_score = float(np.max(anomaly_map[region_mask]))
             
             # 转换到原始图像坐标
             x1 = int(x * orig_W / W)
             y1 = int(y * orig_H / H)
             x2 = int((x + w) * orig_W / W)
             y2 = int((y + h) * orig_H / H)
+            
+            # 确保坐标在图像范围内
+            x1 = max(0, x1)
+            y1 = max(0, y1)
+            x2 = min(orig_W, x2)
+            y2 = min(orig_H, y2)
             
             boxes.append({
                 "bbox": (x1, y1, x2, y2),
@@ -291,8 +310,35 @@ class PatchCore:
                 "area": (x2 - x1) * (y2 - y1)
             })
         
-        # 按得分排序并返回前5个
-        return sorted(boxes, key=lambda x: x["score"], reverse=True)[:5]
+        # 如果没有找到框，直接使用整个热力图中最亮的区域
+        if not boxes:
+            # 找到异常值最大的位置
+            max_idx = np.unravel_index(np.argmax(anomaly_map), anomaly_map.shape)
+            y, x = max_idx
+            
+            # 创建以最大点为中心的框
+            box_h = max(20, H // 8)
+            box_w = max(20, W // 8)
+            
+            x1 = max(0, x - box_w // 2)
+            y1 = max(0, y - box_h // 2)
+            x2 = min(W, x + box_w // 2)
+            y2 = min(H, y + box_h // 2)
+            
+            x1_orig = int(x1 * orig_W / W)
+            y1_orig = int(y1 * orig_H / H)
+            x2_orig = int(x2 * orig_W / W)
+            y2_orig = int(y2 * orig_H / H)
+            
+            boxes = [{
+                "bbox": (x1_orig, y1_orig, x2_orig, y2_orig),
+                "score": float(anomaly_map[y, x]),
+                "center": ((x1_orig + x2_orig) // 2, (y1_orig + y2_orig) // 2),
+                "area": (x2_orig - x1_orig) * (y2_orig - y1_orig)
+            }]
+        
+        # 按得分排序返回所有框（不过滤）
+        return sorted(boxes, key=lambda x: x["score"], reverse=True)[:3]
     
     def visualize_results(self, output_dir):
         """
