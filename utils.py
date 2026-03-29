@@ -16,28 +16,6 @@ def save_uploaded_file(file, upload_folder):
         file.save(filepath)
         return filepath
     return None
-
-def analyze_anomaly_score(score):
-    """分析异常分数"""
-    if score > 10.0:
-        level = "HIGH ANOMALY"
-        message = "Score > 10.0"
-    elif score > 5.0:
-        level = "MEDIUM ANOMALY"
-        message = "5.0 < Score <= 10.0"
-    elif score > 2.0:
-        level = "LOW ANOMALY"
-        message = "2.0 < Score <= 5.0"
-    else:
-        level = "VERY LOW ANOMALY"
-        message = "Score <= 2.0"
-    
-    return {
-        'level': level,
-        'message': message,
-        'score': float(score)  # 确保转换为Python float
-    }
-
 def convert_to_serializable(obj):
     """
     将对象转换为JSON可序列化的格式
@@ -58,33 +36,6 @@ def convert_to_serializable(obj):
         return convert_to_serializable(obj.__dict__)
     else:
         return obj
-
-def get_detection_summary(anomaly_map, bboxes):
-    """获取检测摘要"""
-    norm_map = (anomaly_map - anomaly_map.min()) / (anomaly_map.max() - anomaly_map.min() + 1e-8)
-    
-    summary = {
-        'total_pixels': int(norm_map.size),
-        'anomaly_regions': len(bboxes),
-        'regions': []
-    }
-    
-    # 区域详细信息
-    for i, bbox_info in enumerate(bboxes):
-        x1, y1, x2, y2 = bbox_info['bbox']
-        
-        # 确保所有坐标都是Python原生类型
-        center_x, center_y = bbox_info['center']
-        
-        summary['regions'].append({
-            'id': i + 1,
-            'bbox': [int(x1), int(y1), int(x2), int(y2)],  # 转换为Python int
-            'score': float(bbox_info['score']),  # 转换为Python float
-            'area': int(bbox_info['area']),  # 转换为Python int
-            'center': [int(center_x), int(center_y)]  # 转换为Python int列表
-        })
-    
-    return summary
 
 class JSONEncoder(json.JSONEncoder):
     """自定义JSON编码器，处理NumPy类型"""

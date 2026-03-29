@@ -242,103 +242,126 @@ class PatchCore:
     
     def get_bboxes(self, anomaly_map, feat_size, original_size):
         """
-        从异常图中提取边界框（改进版 - 更宽松）
+        通过峰值检测分离相邻异常区域（独立框版本）
         """
         H, W = feat_size
         orig_W, orig_H = original_size
         
-        # 直接使用较低阈值，确保能检测到异常
-        threshold = np.percentile(anomaly_map, 70)  # 降低到70
+        # 1. 找到所有局部峰值点
+        from scipy import ndimage
         
-        # 如果异常图最大值很低，进一步降低阈值
-        max_anomaly = np.max(anomaly_map)
-        if max_anomaly < 0.5:
-            threshold = np.percentile(anomaly_map, 50)  # 异常不明显时用中位数
+        # 使用最大值滤波器找峰值
+        footprint = np.ones((3, 3))
+        local_max = ndimage.maximum_filter(anomaly_map, footprint=footprint) == anomaly_map
+        # 排除边界和低值
+        local_max = local_max & (anomaly_map > np.percentile(anomaly_map, 85))
         
-        # 创建掩码
-        mask = (anomaly_map > threshold).astype(np.uint8)
+        # 获取峰值坐标
+        peaks_y, peaks_x = np.where(local_max)
+        peak_values = anomaly_map[local_max]
         
-        # 如果掩码为空，直接用最大值的一半作为阈值
-        if mask.sum() == 0:
-            threshold = max_anomaly * 0.5
-            mask = (anomaly_map > threshold).astype(np.uint8)
+        if len(peaks_y) == 0:
+            # 如果没有峰值，使用全局最大值
+            max_idx = np.unravel_index(np.argmax(anomaly_map), anomaly_map.shape)
+            peaks_y = [max_idx[0]]
+            peaks_x = [max_idx[1]]
+            peak_values = [anomaly_map[max_idx]]
         
-        # 形态学操作：先膨胀再腐蚀，连接相邻区域
-        kernel = np.ones((5, 5), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        # 2. 动态计算框的大小（基于异常图的统计）
+        # 框的大小 = 异常区域的平均扩散半径
+        anomaly_pixels = np.where(anomaly_map > np.percentile(anomaly_map, 70))
+        if len(anomaly_pixels[0]) > 0:
+            y_range = np.max(anomaly_pixels[0]) - np.min(anomaly_pixels[0])
+            x_range = np.max(anomaly_pixels[1]) - np.min(anomaly_pixels[1])
+            box_h = max(3, min(H // 3, y_range + 2))
+            box_w = max(3, min(W // 3, x_range + 2))
+        else:
+            box_h = max(3, H // 6)
+            box_w = max(3, W // 6)
         
-        # 连通组件分析
-        num, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
-        
+        # 3. 为每个峰值独立生成边界框（不合并）
         boxes = []
-        for i in range(1, num):
-            area = stats[i, cv2.CC_STAT_AREA]
+        
+        for peak_y, peak_x, peak_val in zip(peaks_y, peaks_x, peak_values):
+            # 计算框的边界
+            y_min = max(0, peak_y - box_h // 2)
+            y_max = min(H - 1, peak_y + box_h // 2)
+            x_min = max(0, peak_x - box_w // 2)
+            x_max = min(W - 1, peak_x + box_w // 2)
             
-            # 降低最小面积要求
-            min_area = max(10, H * W * 0.001)  # 至少10个像素或0.1%
-            if area < min_area:
-                continue
+            # 转换到原始坐标
+            x1 = int(x_min * orig_W / W)
+            y1 = int(y_min * orig_H / H)
+            x2 = int((x_max + 1) * orig_W / W)
+            y2 = int((y_max + 1) * orig_H / H)
             
-            x, y, w, h = (
-                stats[i, cv2.CC_STAT_LEFT],
-                stats[i, cv2.CC_STAT_TOP],
-                stats[i, cv2.CC_STAT_WIDTH],
-                stats[i, cv2.CC_STAT_HEIGHT],
-            )
-            
-            # 计算区域异常得分（取最大值，更敏感）
-            region_mask = (labels == i)
+            # 计算该区域内的实际异常得分
+            region_mask = np.zeros_like(anomaly_map, dtype=bool)
+            region_mask[y_min:y_max+1, x_min:x_max+1] = True
             region_score = float(np.max(anomaly_map[region_mask]))
-            
-            # 转换到原始图像坐标
-            x1 = int(x * orig_W / W)
-            y1 = int(y * orig_H / H)
-            x2 = int((x + w) * orig_W / W)
-            y2 = int((y + h) * orig_H / H)
-            
-            # 确保坐标在图像范围内
-            x1 = max(0, x1)
-            y1 = max(0, y1)
-            x2 = min(orig_W, x2)
-            y2 = min(orig_H, y2)
             
             boxes.append({
                 "bbox": (x1, y1, x2, y2),
                 "score": region_score,
+                "peak_value": float(peak_val),
                 "center": ((x1 + x2) // 2, (y1 + y2) // 2),
-                "area": (x2 - x1) * (y2 - y1)
+                "area": (x2 - x1) * (y2 - y1),
+                "peak_position": (peak_y, peak_x)
             })
         
-        # 如果没有找到框，直接使用整个热力图中最亮的区域
-        if not boxes:
-            # 找到异常值最大的位置
+        # 4. 按得分排序
+        boxes = sorted(boxes, key=lambda x: x["score"], reverse=True)
+        
+        # 5. 可选：如果两个框重叠严重，保留得分高的，移除得分低的
+        def calculate_iou(box1, box2):
+            x1, y1, x2, y2 = box1["bbox"]
+            xx1, yy1, xx2, yy2 = box2["bbox"]
+            inter_x1 = max(x1, xx1)
+            inter_y1 = max(y1, yy1)
+            inter_x2 = min(x2, xx2)
+            inter_y2 = min(y2, yy2)
+            if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
+                return 0
+            inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+            box1_area = (x2 - x1) * (y2 - y1)
+            return inter_area / box1_area
+        
+        # 非极大值抑制（允许一定重叠）
+        final_boxes = []
+        for box in boxes:
+            overlap = False
+            for existing in final_boxes:
+                if calculate_iou(box, existing) > 0.6:  # IoU > 0.6 认为重叠严重
+                    overlap = True
+                    break
+            if not overlap:
+                final_boxes.append(box)
+        
+        # 6. 兜底
+        if not final_boxes:
             max_idx = np.unravel_index(np.argmax(anomaly_map), anomaly_map.shape)
             y, x = max_idx
+            box_h = max(3, H // 6)
+            box_w = max(3, W // 6)
+            y_min = max(0, y - box_h // 2)
+            y_max = min(H - 1, y + box_h // 2)
+            x_min = max(0, x - box_w // 2)
+            x_max = min(W - 1, x + box_w // 2)
             
-            # 创建以最大点为中心的框
-            box_h = max(20, H // 8)
-            box_w = max(20, W // 8)
+            x1 = int(x_min * orig_W / W)
+            y1 = int(y_min * orig_H / H)
+            x2 = int((x_max + 1) * orig_W / W)
+            y2 = int((y_max + 1) * orig_H / H)
             
-            x1 = max(0, x - box_w // 2)
-            y1 = max(0, y - box_h // 2)
-            x2 = min(W, x + box_w // 2)
-            y2 = min(H, y + box_h // 2)
-            
-            x1_orig = int(x1 * orig_W / W)
-            y1_orig = int(y1 * orig_H / H)
-            x2_orig = int(x2 * orig_W / W)
-            y2_orig = int(y2 * orig_H / H)
-            
-            boxes = [{
-                "bbox": (x1_orig, y1_orig, x2_orig, y2_orig),
+            final_boxes = [{
+                "bbox": (x1, y1, x2, y2),
                 "score": float(anomaly_map[y, x]),
-                "center": ((x1_orig + x2_orig) // 2, (y1_orig + y2_orig) // 2),
-                "area": (x2_orig - x1_orig) * (y2_orig - y1_orig)
+                "center": ((x1 + x2) // 2, (y1 + y2) // 2),
+                "area": (x2 - x1) * (y2 - y1)
             }]
         
-        # 按得分排序返回所有框（不过滤）
-        return sorted(boxes, key=lambda x: x["score"], reverse=True)[:3]
+        
+        return final_boxes[:5]
     
     def visualize_results(self, output_dir):
         """

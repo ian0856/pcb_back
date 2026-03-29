@@ -146,7 +146,8 @@ class DatabaseService:
                 - heatmap_image_path: 热力图图像路径
                 - original_image: PIL.Image对象（原始图像）
                 - output_image: PIL.Image对象（标注图像）
-                - heatmap_image: PIL.Image对象（热力图）
+                - heatmap_image: PIL.
+                - points: 检测到的点数据（字符串或列表）
         Returns:
             dict: 保存结果，包含success和message
         """
@@ -160,6 +161,9 @@ class DatabaseService:
             upload_image = self.image_processor.read_image_file(detection_data.get('upload_image_path'))
             output_image = self.image_processor.read_image_file(detection_data.get('output_image_path'))
             heatmap_image = self.image_processor.read_image_file(detection_data.get('heatmap_image_path'))
+
+            points = detection_data.get('points', '')
+            print(f"📌 检测到的点数据: {points}")
             
             if not all([upload_image, output_image, heatmap_image]):
                 logger.error("❌ 无法读取所有图像文件")
@@ -190,8 +194,8 @@ class DatabaseService:
             query = """
                 INSERT INTO detection_log (
                     upload, upload_time, status, 
-                    output, clean_heatmap, cover_heatmap
-                ) VALUES (%s, %s, %s, %s, %s, %s)
+                    output, clean_heatmap, cover_heatmap,points
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
             """
             
             params = (
@@ -200,7 +204,8 @@ class DatabaseService:
                 status,                # status (varchar)
                 output_bytes,          # output (longblob)
                 clean_heatmap_bytes,   # clean_heatmap (longblob)
-                cover_heatmap_bytes    # cover_heatmap (longblob)
+                cover_heatmap_bytes,    # cover_heatmap (longblob)
+                points
             )
             
             result = self.execute_query(query, params)

@@ -4,6 +4,7 @@ import os
 from werkzeug.utils import secure_filename
 from utils import allowed_file, save_uploaded_file, convert_to_serializable
 from config import Config
+import json
 
 def register_routes(app, detection_service, database_service=None):
     """注册API路由"""
@@ -62,6 +63,11 @@ def register_routes(app, detection_service, database_service=None):
             
             # 处理图像
             result = detection_service.process_image(filepath)
+            print(f"✅ Detection result: {result}")
+
+            # 处理points
+            points = json.dumps(result.get('regions', []))
+            print(f"📌 Detected points: {points}")
             
             # 构建响应前转换所有数据为可序列化格式
             serializable_result = convert_to_serializable(result)
@@ -87,7 +93,8 @@ def register_routes(app, detection_service, database_service=None):
                     detection_data = {
                         'upload_image_path': filepath,
                         'output_image_path': response['result_image'],
-                        'heatmap_image_path': response['heatmap_image']
+                        'heatmap_image_path': response['heatmap_image'],
+                        'points': points
                     }
                     
                     db_save_result = database_service.save_detection_log(detection_data)

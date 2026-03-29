@@ -54,6 +54,7 @@ class DatabaseService:
                 - original_image: PIL.Image对象（原始图像）
                 - output_image: PIL.Image对象（标注图像）
                 - heatmap_image: PIL.Image对象（热力图）
+                - points: regions数组JSON对象
         Returns:
             dict: 保存结果，包含success和message
         """
@@ -61,7 +62,8 @@ class DatabaseService:
             return {'success': False, 'message': '数据库不可用'}
         
         try:
-            logger.info("💾 开始保存检测日志到数据库...")
+
+            points = detection_data.get('points', '')
             
             # 读取图像文件
             upload_image = self.image_processor.read_image_file(detection_data.get('upload_image_path'))
@@ -97,8 +99,8 @@ class DatabaseService:
             query = """
                 INSERT INTO detection_log (
                     upload, upload_time, status, 
-                    output, clean_heatmap, cover_heatmap
-                ) VALUES (%s, %s, %s, %s, %s, %s)
+                    output, clean_heatmap, cover_heatmap, points
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
             """
             
             params = (
@@ -107,7 +109,8 @@ class DatabaseService:
                 status,                # status (varchar)
                 output_bytes,          # output (longblob)
                 clean_heatmap_bytes,   # clean_heatmap (longblob)
-                cover_heatmap_bytes    # cover_heatmap (longblob)
+                cover_heatmap_bytes,    # cover_heatmap (longblob)
+                points
             )
             
             result = self.execute_query(query, params)
